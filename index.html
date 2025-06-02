@@ -1,0 +1,196 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Election Map</title>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        #map {
+            height: 600px;
+            width: 100%;
+            border: 1px solid #ccc;
+        }
+        #vote-info {
+            margin-top: 20px;
+            font-size: 16px;
+        }
+        .info {
+            padding: 10px;
+            background: white;
+            border-radius: 5px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+    </style>
+</head>
+<body>
+    <div id="vote-info" class="info">
+        <p><strong>Electoral Votes</strong> — Rockefeller: <span id="gop-electoral">0</span>, Gephardt: <span id="dem-electoral">0</span></p>
+        <p><strong>Popular Vote</strong> — Rockefeller: <span id="gop-votes">0 (0%)</span>, Gephardt: <span id="dem-votes">0 (0%)</span></p>
+        <p><strong>Reporting</strong>: <span id="reporting">0%</span></p>
+    </div>
+    <div id="map"></div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // Initialize the map
+        const map = L.map('map').setView([37.8, -96], 4);
+
+        // Add a base tile layer (optional, for context)
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
+
+        // Function to style states based on winner
+        function getColor(winner) {
+            return winner === 'Jay Rockefeller' ? '#ff0000' : // Red for GOP
+                   winner === 'Democrat' ? '#0000ff' : // Blue for Democrat
+                   '#808080'; // Gray for uncalled or other
+        }
+
+        // Function to calculate vote totals and update the display
+        function updateVoteTotals(geojson) {
+            let gopElectoral = 0, demElectoral = 0;
+            let gopVotes = 0, demVotes = 0;
+            let totalVotes = 0;
+            let totalReporting = 0;
+            let statesCounted = 0;
+
+            geojson.features.forEach(feature => {
+                const props = feature.properties;
+                if (props.winner === 'Jay Rockefeller') {
+                    gopElectoral += props.electoral_votes || 0;
+                    gopVotes += props.votes_gop || 0;
+                } else if (props.winner === 'Democrat') {
+                    demElectoral += props.electoral_votes || 0;
+                    demVotes += props.votes_dem || 0;
+                }
+                totalVotes += props.total_votes || 0;
+                if (props.reporting) {
+                    totalReporting += props.reporting;
+                    statesCounted++;
+                }
+            });
+
+            // Calculate percentages
+            const gopPercent = totalVotes ? ((gopVotes / totalVotes) * 100).toFixed(1) : 0;
+            const demPercent = totalVotes ? ((demVotes / totalVotes) * 100).toFixed(1) : 0;
+            const avgReporting = statesCounted ? (totalReporting / statesCounted).toFixed(1) : 0;
+
+            // Update HTML
+            document.getElementById('gop-electoral').textContent = gopElectoral;
+            document.getElementById('dem-electoral').textContent = demElectoral;
+            document.getElementById('gop-votes').textContent = `${gopVotes.toLocaleString()} (${gopPercent}%)`;
+            document.getElementById('dem-votes').textContent = `${demVotes.toLocaleString()} (${demPercent}%)`;
+            document.getElementById('reporting').textContent = `${avgReporting}%`;
+        }
+
+        // Load GeoJSON and add to map
+        fetch('base-states-with-results.geojson')
+            .then(response => response.json())
+            .then(geojson => {
+                // Update vote totals
+                updateVoteTotals(geojson);
+
+                // Add GeoJSON layer
+                L.geoJSON(geojson, {
+                    style: function(feature) {
+                        return {
+                            fillColor: getColor(feature.properties.winner),
+                            weight: 1,
+                            opacity: 1,
+                            color: 'white',
+                            fillOpacity: 0.7
+                        };
+                    },
+                    onEachFeature: function(feature, layer) {
+                        // Bind tooltip with election data
+                        const props = feature.properties;
+                        const tooltipContent = `
+                            <strong>${props.NAME}</strong><br>
+                            Status: ${props.status}<br>
+                            Electoral Votes: ${props.electoral_votes}<br>
+                            GOP (Rockefeller): ${props.votes_gop.toLocaleString()} (${((props.votes_gop / props.total_votes) * 100).toFixed(1)}%)<br>
+                            Dem (Gephardt): ${props.votes_dem.toLocaleString()} (${((props.votes_dem / props.total_votes) * 100).toFixed(1)}%)<br>
+                            Reporting: ${props.reporting.toFixed(1)}%
+                        `;
+                        layer.bindTooltip(tooltipContent, { sticky: true });
+
+                        // Highlight on hover
+                        layer.on({
+                            mouseover: function(e) {
+                                const layer = e.target;
+                                layer.setStyle({
+                                    weight: 3,
+                                    color: '#666',
+                                    fillOpacity: 0.9
+                                });
+                                layer.bringToFront();
+                            },
+                            mouseout: function(e) {
+                                const layer = e.target;
+                                layer.setStyle({
+                                    weight: 1,
+                                    color: 'white',
+                                    fillOpacity: 0.7
+                                });
+                            }
+                        });
+                    }
+                }).addTo(map);
+
+                // Fit map to bounds of GeoJSON
+                const bounds = L.geoJSON(geojson).getBounds();
+                map.fitBounds(bounds);
+            })
+            .catch(error => console.error('Error loading GeoJSON:', error));
+    </script>
+</body>
+</html>
