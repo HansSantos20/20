@@ -1,196 +1,132 @@
-<script type="text/javascript">
-        var gk_isXlsx = false;
-        var gk_xlsxFileLookup = {};
-        var gk_fileData = {};
-        function filledCell(cell) {
-          return cell !== '' && cell != null;
-        }
-        function loadFileData(filename) {
-        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
-            try {
-                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
-                var firstSheetName = workbook.SheetNames[0];
-                var worksheet = workbook.Sheets[firstSheetName];
-
-                // Convert sheet to JSON to filter blank rows
-                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
-                // Filter out blank rows (rows where all cells are empty, null, or undefined)
-                var filteredData = jsonData.filter(row => row.some(filledCell));
-
-                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
-                var headerRowIndex = filteredData.findIndex((row, index) =>
-                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
-                );
-                // Fallback
-                if (headerRowIndex === -1 || headerRowIndex > 25) {
-                  headerRowIndex = 0;
-                }
-
-                // Convert filtered JSON back to CSV
-                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
-                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
-                return csv;
-            } catch (e) {
-                console.error(e);
-                return "";
-            }
-        }
-        return gk_fileData[filename] || "";
-        }
-        </script><!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Election Map</title>
-    <!-- Leaflet CSS -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <title>Election Results Map</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
     <style>
         body {
             font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background-color: #f0f0f0;
+            text-align: center;
+            margin: 20px;
         }
         #map {
-            height: 600px;
-            width: 100%;
-            border: 1px solid #ccc;
+            max-width: 960px;
+            margin: 0 auto;
         }
-        #vote-info {
-            margin-top: 20px;
-            font-size: 16px;
+        .state {
+            stroke: #fff;
+            stroke-width: 0.5;
         }
-        .info {
-            padding: 10px;
-            background: white;
-            border-radius: 5px;
-            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        .state.GOP {
+            fill: #ff0000;
+        }
+        .state.Democrat {
+            fill: #0000ff;
+        }
+        .state.Uncalled {
+            fill: #808080;
+        }
+        .state:hover {
+            fill-opacity: 0.7;
+            cursor: pointer;
+        }
+        #tooltip {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.8);
+            color: #fff;
+            padding: 8px;
+            border-radius: 4px;
+            pointer-events: none;
+            font-size: 12px;
+            display: none;
+        }
+        .summary {
+            margin-bottom: 20px;
         }
     </style>
 </head>
 <body>
-    <div id="vote-info" class="info">
+    <div class="summary">
+        <h2>Election Results</h2>
         <p><strong>Electoral Votes</strong> — Rockefeller: <span id="gop-electoral">0</span>, Gephardt: <span id="dem-electoral">0</span></p>
-        <p><strong>Popular Vote</strong> — Rockefeller: <span id="gop-votes">0 (0%)</span>, Gephardt: <span id="dem-votes">0 (0%)</span></p>
-        <p><strong>Reporting</strong>: <span id="reporting">0%</span></p>
+        <p><strong>Popular Vote</strong> — Rockefeller: <span id="gop-votes">0</span> (<span id="gop-percent">0%</span>), Gephardt: <span id="dem-votes">0</span> (<span id="dem-percent">0%</span>)</p>
+        <p><strong>Reporting:</strong> <span id="reporting">0%</span></p>
     </div>
     <div id="map"></div>
+    <div id="tooltip"></div>
 
-    <!-- Leaflet JS -->
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
-        // Initialize the map
-        const map = L.map('map').setView([37.8, -96], 4);
+        // Load GeoJSON (assumed to be in the same directory as index.html)
+        d3.json("base-states-with-results.geojson").then(function(geojson) {
+            // Set up SVG dimensions
+            const width = 960;
+            const height = 600;
 
-        // Add a base tile layer (optional, for context)
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-        }).addTo(map);
+            // Create SVG container
+            const svg = d3.select("#map")
+                .append("svg")
+                .attr("width", width)
+                .attr("height", height);
 
-        // Function to style states based on winner
-        function getColor(winner) {
-            return winner === 'Jay Rockefeller' ? '#ff0000' : // Red for GOP
-                   winner === 'Democrat' ? '#0000ff' : // Blue for Democrat
-                   '#808080'; // Gray for uncalled or other
-        }
+            // Define projection (Albers USA for US states, including Puerto Rico)
+            const projection = d3.geoAlbersUsa()
+                .scale(1000)
+                .translate([width / 2, height / 2]);
 
-        // Function to calculate vote totals and update the display
-        function updateVoteTotals(geojson) {
-            let gopElectoral = 0, demElectoral = 0;
-            let gopVotes = 0, demVotes = 0;
-            let totalVotes = 0;
-            let totalReporting = 0;
-            let statesCounted = 0;
+            const path = d3.geoPath().projection(projection);
 
+            // Calculate vote totals
+            let gopElectoral = 0, demElectoral = 0, gopVotes = 0, demVotes = 0, totalVotes = 0;
             geojson.features.forEach(feature => {
                 const props = feature.properties;
-                if (props.winner === 'Jay Rockefeller') {
+                if (props.winner === "Jay Rockefeller") {
                     gopElectoral += props.electoral_votes || 0;
                     gopVotes += props.votes_gop || 0;
-                } else if (props.winner === 'Democrat') {
+                } else if (props.winner === "Democrat") {
                     demElectoral += props.electoral_votes || 0;
                     demVotes += props.votes_dem || 0;
                 }
                 totalVotes += props.total_votes || 0;
-                if (props.reporting) {
-                    totalReporting += props.reporting;
-                    statesCounted++;
-                }
             });
 
-            // Calculate percentages
-            const gopPercent = totalVotes ? ((gopVotes / totalVotes) * 100).toFixed(1) : 0;
-            const demPercent = totalVotes ? ((demVotes / totalVotes) * 100).toFixed(1) : 0;
-            const avgReporting = statesCounted ? (totalReporting / statesCounted).toFixed(1) : 0;
+            // Update summary
+            d3.select("#gop-electoral").text(gopElectoral);
+            d3.select("#dem-electoral").text(demElectoral);
+            d3.select("#gop-votes").text(gopVotes.toLocaleString());
+            d3.select("#dem-votes").text(demVotes.toLocaleString());
+            d3.select("#gop-percent").text(totalVotes ? ((gopVotes / totalVotes) * 100).toFixed(1) + "%" : "0%");
+            d3.select("#dem-percent").text(totalVotes ? ((demVotes / totalVotes) * 100).toFixed(1) + "%" : "0%");
+            d3.select("#reporting").text(((geojson.features.reduce((sum, f) => sum + (f.properties.reporting || 0), 0) / geojson.features.length).toFixed(1)) + "%");
 
-            // Update HTML
-            document.getElementById('gop-electoral').textContent = gopElectoral;
-            document.getElementById('dem-electoral').textContent = demElectoral;
-            document.getElementById('gop-votes').textContent = `${gopVotes.toLocaleString()} (${gopPercent}%)`;
-            document.getElementById('dem-votes').textContent = `${demVotes.toLocaleString()} (${demPercent}%)`;
-            document.getElementById('reporting').textContent = `${avgReporting}%`;
-        }
-
-        // Load GeoJSON and add to map
-        fetch('base-states-with-results.geojson')
-            .then(response => response.json())
-            .then(geojson => {
-                // Update vote totals
-                updateVoteTotals(geojson);
-
-                // Add GeoJSON layer
-                L.geoJSON(geojson, {
-                    style: function(feature) {
-                        return {
-                            fillColor: getColor(feature.properties.winner),
-                            weight: 1,
-                            opacity: 1,
-                            color: 'white',
-                            fillOpacity: 0.7
-                        };
-                    },
-                    onEachFeature: function(feature, layer) {
-                        // Bind tooltip with election data
-                        const props = feature.properties;
-                        const tooltipContent = `
+            // Draw states
+            svg.selectAll(".state")
+                .data(geojson.features)
+                .enter()
+                .append("path")
+                .attr("class", d => `state ${d.properties.winner || "Uncalled"}`)
+                .attr("d", path)
+                .on("mouseover", function(event, d) {
+                    const props = d.properties;
+                    const tooltip = d3.select("#tooltip");
+                    tooltip.style("display", "block")
+                        .html(`
                             <strong>${props.NAME}</strong><br>
-                            Status: ${props.status}<br>
-                            Electoral Votes: ${props.electoral_votes}<br>
                             GOP (Rockefeller): ${props.votes_gop.toLocaleString()} (${((props.votes_gop / props.total_votes) * 100).toFixed(1)}%)<br>
-                            Dem (Gephardt): ${props.votes_dem.toLocaleString()} (${((props.votes_dem / props.total_votes) * 100).toFixed(1)}%)<br>
-                            Reporting: ${props.reporting.toFixed(1)}%
-                        `;
-                        layer.bindTooltip(tooltipContent, { sticky: true });
-
-                        // Highlight on hover
-                        layer.on({
-                            mouseover: function(e) {
-                                const layer = e.target;
-                                layer.setStyle({
-                                    weight: 3,
-                                    color: '#666',
-                                    fillOpacity: 0.9
-                                });
-                                layer.bringToFront();
-                            },
-                            mouseout: function(e) {
-                                const layer = e.target;
-                                layer.setStyle({
-                                    weight: 1,
-                                    color: 'white',
-                                    fillOpacity: 0.7
-                                });
-                            }
-                        });
-                    }
-                }).addTo(map);
-
-                // Fit map to bounds of GeoJSON
-                const bounds = L.geoJSON(geojson).getBounds();
-                map.fitBounds(bounds);
-            })
-            .catch(error => console.error('Error loading GeoJSON:', error));
+                            Democrat (Gephardt): ${props.votes_dem.toLocaleString()} (${((props.votes_dem / props.total_votes) * 100).toFixed(1)}%)<br>
+                            Reporting: ${props.reporting.toFixed(1)}%<br>
+                            Status: ${props.status}
+                        `)
+                        .style("left", (event.pageX + 10) + "px")
+                        .style("top", (event.pageY - 10) + "px");
+                })
+                .on("mouseout", function() {
+                    d3.select("#tooltip").style("display", "none");
+                });
+        }).catch(function(error) {
+            console.error("Error loading GeoJSON:", error);
+        });
     </script>
 </body>
 </html>
